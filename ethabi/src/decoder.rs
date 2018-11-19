@@ -44,7 +44,7 @@ pub fn decode(types: &[ParamType], data: &[u8]) -> Result<Vec<Token>, Error> {
 	let mut tokens = vec![];
 	let mut offset = 0;
 	for param in types {
-		let res = decode_param(param, &slices, offset).chain_err(|| format!("Cannot decode {}", param))?;
+		let res = decode_param(param, &slices, 0, offset).chain_err(|| format!("Cannot decode {}", param))?;
 		offset = res.new_offset;
 		tokens.push(res.token);
 	}
@@ -55,7 +55,8 @@ fn peek(slices: &[[u8; 32]], position: usize) -> Result<&[u8; 32], Error> {
 	slices.get(position).ok_or_else(|| ErrorKind::InvalidData.into())
 }
 
-fn take_bytes(slices: &[[u8; 32]], position: usize, len: usize) -> Result<BytesTaken, Error> {
+fn take_bytes(slices: &[[u8; 32]], base: usize, offset: usize, len: usize) -> Result<BytesTaken, Error> {
+	let position = base + offset;
 	let slices_len = (len + 31) / 32;
 
 	let mut bytes_slices = vec![];
@@ -71,16 +72,16 @@ fn take_bytes(slices: &[[u8; 32]], position: usize, len: usize) -> Result<BytesT
 
 	let taken = BytesTaken {
 		bytes,
-		new_offset: position + slices_len,
+		new_offset: offset + slices_len,
 	};
 
 	Ok(taken)
 }
 
-fn decode_param(param: &ParamType, slices: &[[u8; 32]], offset: usize) -> Result<DecodeResult, Error> {
+fn decode_param(param: &ParamType, slices: &[[u8; 32]], base: usize, offset: usize) -> Result<DecodeResult, Error> {
 	match *param {
 		ParamType::Address => {
-			let slice = try!(peek(slices, offset));
+			let slice = try!(peek(slices, base + offset));
 			let mut address = [0u8; 20];
 			address.copy_from_slice(&slice[12..]);
 
@@ -92,7 +93,7 @@ fn decode_param(param: &ParamType, slices: &[[u8; 32]], offset: usize) -> Result
 			Ok(result)
 		},
 		ParamType::Int(_) => {
-			let slice = try!(peek(slices, offset));
+			let slice = try!(peek(slices, base + offset));
 
 			let result = DecodeResult {
 				token: Token::Int(slice.clone().into()),
@@ -102,7 +103,7 @@ fn decode_param(param: &ParamType, slices: &[[u8; 32]], offset: usize) -> Result
 			Ok(result)
 		},
 		ParamType::Uint(_) => {
-			let slice = try!(peek(slices, offset));
+			let slice = try!(peek(slices, base + offset));
 
 			let result = DecodeResult {
 				token: Token::Uint(slice.clone().into()),
@@ -112,7 +113,7 @@ fn decode_param(param: &ParamType, slices: &[[u8; 32]], offset: usize) -> Result
 			Ok(result)
 		},
 		ParamType::Bool => {
-			let slice = try!(peek(slices, offset));
+			let slice = try!(peek(slices, base + offset));
 
 			let b = try!(as_bool(slice));
 
@@ -124,7 +125,7 @@ fn decode_param(param: &ParamType, slices: &[[u8; 32]], offset: usize) -> Result
 			Ok(result)
 		},
 		ParamType::FixedBytes(len) => {
-			let taken = try!(take_bytes(slices, offset, len));
+			let taken = try!(take_bytes(slices, base, offset, len));
 
 			let result = DecodeResult {
 				token: Token::FixedBytes(taken.bytes),
@@ -134,13 +135,13 @@ fn decode_param(param: &ParamType, slices: &[[u8; 32]], offset: usize) -> Result
 			Ok(result)
 		},
 		ParamType::Bytes => {
-			let offset_slice = try!(peek(slices, offset));
+			let offset_slice = try!(peek(slices, base + offset));
 			let len_offset = (try!(as_u32(offset_slice)) / 32) as usize;
 
 			let len_slice = try!(peek(slices, len_offset));
 			let len = try!(as_u32(len_slice)) as usize;
 
-			let taken = try!(take_bytes(slices, len_offset + 1, len));
+			let taken = try!(take_bytes(slices, len_offset + 1, 0, len));
 
 			let result = DecodeResult {
 				token: Token::Bytes(taken.bytes),
@@ -150,13 +151,13 @@ fn decode_param(param: &ParamType, slices: &[[u8; 32]], offset: usize) -> Result
 			Ok(result)
 		},
 		ParamType::String => {
-			let offset_slice = try!(peek(slices, offset));
+			let offset_slice = try!(peek(slices, base + offset));
 			let len_offset = (try!(as_u32(offset_slice)) / 32) as usize;
 
 			let len_slice = try!(peek(slices, len_offset));
 			let len = try!(as_u32(len_slice)) as usize;
 
-			let taken = try!(take_bytes(slices, len_offset + 1, len));
+			let taken = try!(take_bytes(slices, len_offset + 1, 0, len));
 
 			let result = DecodeResult {
 				token: Token::String(try!(String::from_utf8(taken.bytes))),
@@ -166,17 +167,18 @@ fn decode_param(param: &ParamType, slices: &[[u8; 32]], offset: usize) -> Result
 			Ok(result)
 		},
 		ParamType::Array(ref t) => {
-			let offset_slice = try!(peek(slices, offset));
-			let len_offset = (try!(as_u32(offset_slice)) / 32) as usize;
+			let offset_slice = try!(peek(slices, base + offset));
+			let len_offset = base + (try!(as_u32(offset_slice)) / 32) as usize;
 
 			let len_slice = try!(peek(slices, len_offset));
 			let len = try!(as_u32(len_slice)) as usize;
 
 			let mut tokens = vec![];
-			let mut new_offset = len_offset + 1;
+			let new_base = len_offset + 1;
+			let mut new_offset = 0;
 
 			for _ in 0..len {
-				let res = try!(decode_param(t, &slices, new_offset));
+				let res = try!(decode_param(t, &slices, new_base, new_offset));
 				new_offset = res.new_offset;
 				tokens.push(res.token);
 			}
@@ -192,7 +194,7 @@ fn decode_param(param: &ParamType, slices: &[[u8; 32]], offset: usize) -> Result
 			let mut tokens = vec![];
 			let mut new_offset = offset;
 			for _ in 0..len {
-				let res = try!(decode_param(t, &slices, new_offset));
+				let res = try!(decode_param(t, &slices, base, new_offset));
 				new_offset = res.new_offset;
 				tokens.push(res.token);
 			}
@@ -311,8 +313,8 @@ mod tests {
 		let encoded  = hex!("
 			0000000000000000000000000000000000000000000000000000000000000020
 			0000000000000000000000000000000000000000000000000000000000000002
+			0000000000000000000000000000000000000000000000000000000000000040
 			0000000000000000000000000000000000000000000000000000000000000080
-			00000000000000000000000000000000000000000000000000000000000000c0
 			0000000000000000000000000000000000000000000000000000000000000001
 			0000000000000000000000001111111111111111111111111111111111111111
 			0000000000000000000000000000000000000000000000000000000000000001
@@ -338,8 +340,8 @@ mod tests {
 		let encoded = hex!("
 			0000000000000000000000000000000000000000000000000000000000000020
 			0000000000000000000000000000000000000000000000000000000000000002
-			0000000000000000000000000000000000000000000000000000000000000080
-			00000000000000000000000000000000000000000000000000000000000000e0
+			0000000000000000000000000000000000000000000000000000000000000040
+			00000000000000000000000000000000000000000000000000000000000000a0
 			0000000000000000000000000000000000000000000000000000000000000002
 			0000000000000000000000001111111111111111111111111111111111111111
 			0000000000000000000000002222222222222222222222222222222222222222
